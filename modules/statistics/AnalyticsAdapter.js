@@ -102,6 +102,24 @@ class AnalyticsAdapter {
     }
 
     /**
+     * Reset the state to the initial one.
+     *
+     * @returns {void}
+     */
+    reset() {
+        this.disposed = false;
+        this.analyticsHandlers = new Set();
+        this.cache = [];
+        this.conferenceName = '';
+        this.permanentProperties = {};
+        this.addPermanentProperties({
+            'callstats_name': Settings.callStatsUserName,
+            'user_agent': navigator.userAgent,
+            'browser_name': browser.getName()
+        });
+    }
+
+    /**
      * Dispose analytics. Clears all handlers.
      */
     dispose() {
