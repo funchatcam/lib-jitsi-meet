@@ -61,6 +61,68 @@ const logger = getLogger(__filename);
 const JINGLE_SI_TIMEOUT = 5000;
 
 /**
+ * A delayed ICE failed notification which is triggered only if the ICE
+ * connection does not recover soon after or before the XMPP connection is
+ * restored (if it was ever broken). If ICE fails while the XMPP connection is
+ * not broken then the notifications will be sent after 2 seconds delay. This
+ * extra delay is not intentional just a side effect of the code.
+ * NOTE that this delayed task can only be used if PING is supported by the XMPP
+ * server.
+ */
+class DelayedIceFailed {
+    /**
+     * Creates new {@code DelayedIceFailed} task.
+     * @param {JitsiConference} conference
+     */
+    constructor(conference) {
+        this._conference = conference;
+    }
+
+    /**
+     * Starts the task.
+     * @param {JingleSessionPC} session - the JVB Jingle session.
+     */
+    start(session) {
+        // The 65 seconds are greater than the default Prosody's BOSH
+        // timeout of 60. This gives some time for the XMPP connection
+        // to recover.
+        this._conference.xmpp.ping(65000).then(
+            () => {
+                if (this._canceled) {
+                    return;
+                }
+
+                if (this._conference.isJvbConnectionInterrupted) {
+                    this._iceFailedTimeout = window.setTimeout(() => {
+                        logger.info(
+                            'Sending ICE failed'
+                            + ' - the connection has not recovered');
+                        session.sendIceFailedNotification();
+                    }, 2000);
+                } else {
+                    logger.info(
+                        'ICE connection restored - not sending ICE failed');
+                }
+            },
+            error => {
+                logger.error(
+                    'PING error/timeout - not sending ICE failed', error);
+            });
+    }
+
+    /**
+     * Cancels the task.
+     */
+    cancel() {
+        this._canceled = true;
+        if (this._iceFailedTimeout) {
+            window.clearTimeout(this._iceFailedTimeout);
+        }
+        logger.info('The ICE failed notification has been canceled');
+    }
+}
+
+/**
  * Creates a JitsiConference object with the given name and properties.
  * Note: this constructor is not a part of the public API (objects should be
  * created using JitsiConnection.createConference).
@@ -433,6 +495,8 @@ JitsiConference.prototype.leave = function() {
     if (this.statistics) {
         this.statistics.dispose();
     }
+
+    this._delayedIceFailed && this._delayedIceFailed.cancel();
 
     // Close both JVb and P2P JingleSessions
     if (this.jvbJingleSession) {
@@ -2363,8 +2427,14 @@ JitsiConference.prototype._onIceConnectionFailed = function(session) {
         }
         this._stopP2PSession('connectivity-error', 'ICE FAILED');
     } else if (session && this.jvbJingleSession === session) {
-        // Let Jicofo know that the JVB's ICE connection has failed
-        session.sendIceFailedNotification();
+        if (this.xmpp.isPingSupported()) {
+            this._delayedIceFailed = new DelayedIceFailed(this);
+            this._delayedIceFailed.start(session);
+        } else {
+            // Let Jicofo know that the JVB's ICE connection has failed
+            logger.info('PING not supported - sending ICE failed immediately');
+            session.sendIceFailedNotification();
+        }
     }
 };
 
@@ -2378,6 +2448,7 @@ JitsiConference.prototype._onIceConnectionRestored = function(session) {
         this.isP2PConnectionInterrupted = false;
     } else {
         this.isJvbConnectionInterrupted = false;
+        this._delayedIceFailed && this._delayedIceFailed.cancel();
     }
 
     if (session.isP2P === this.isP2PActive()) {
